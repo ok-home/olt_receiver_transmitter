@@ -56,36 +56,36 @@ static QueueHandle_t olt_rx_queue = 0;
 static TaskHandle_t olt_tx_task_handle = 0;
 
 static rmt_channel_handle_t tx_chan_handle = NULL;
-static rmt_copy_encoder_config_t tx_encoder_config = {0};
+static rmt_encoder_handle_t tx_encoder = NULL;
 static rmt_channel_handle_t rx_chan = NULL;
 
 
 static size_t olt_tx_rmt_decode(olt_packet_t data_in, rmt_symbol_word_t *data_out)
 {
-    uint32_t data = data_in.val;
-    uint32_t mask = 0x8000;
+    uint32_t mask = 0x80000000;
     size_t size = 0;
-    if(data_in.shot_long_bit == 0){size = 22;}
-    else {size = (data_in.byte_ext == 0) ? 24 : 32;}
+    if(data_in.shot_packet.shot_long_bit == 0){size = 22;}
+    else {size = (data_in.long_packet.byte_ext == 0) ? 24 : 32;}
     size++;
 
     data_out[0] = olt_rmt_start;
-    for(int i=1;i < size , i++)
+    int i;
+    for(i=1;i < size ; i++)
     {
-        data_out[i] = (mask & data) ?  olt_rmt_one : olt_rmt_zero;
+        data_out[i] = (mask & data_in.val) ?  olt_rmt_one : olt_rmt_zero;
         mask >>= 1;
     }
     data_out[i] = olt_rmt_stop;
     return i;
 }
 
-static void olt_tx_task(*p)
+static void olt_tx_task(void* p)
 {
     ESP_LOGI(TAG,"Create tx task");
     rmt_transmit_config_t rmt_tx_config = {0};
     //rmt_tx_config.loop_count = 0;
     rmt_symbol_word_t rmt_data_out[OLT_CHANNEL_SIZE];
-    olt_packet_t receive_packet = 0;
+    olt_packet_t receive_packet = {0};
     while(1){
     xQueueReceive(olt_tx_queue,&receive_packet,portMAX_DELAY);
     size_t decoded_data_size = olt_tx_rmt_decode(receive_packet,rmt_data_out);
@@ -96,7 +96,8 @@ static void olt_tx_task(*p)
 
 esp_err_t olt_tx_data(olt_packet_t data)
 {
-    xQueueSend(olt_tx_queue, &(const void*)data, portMAX_DELAY);
+    const void *tx_packet = &data;
+    xQueueSend(olt_tx_queue, tx_packet, portMAX_DELAY);
     return ESP_OK;
 }
 
@@ -123,11 +124,11 @@ esp_err_t olt_tx_channel_init(void)
     ESP_ERROR_CHECK(rmt_apply_carrier(tx_chan_handle, &tx_carrier_cfg));
 #endif
 
-    rmt_encoder_handle_t tx_encoder = NULL;
+    rmt_copy_encoder_config_t tx_encoder_config = {0};
     ESP_ERROR_CHECK(rmt_new_copy_encoder(&tx_encoder_config, &tx_encoder));
     ESP_ERROR_CHECK(rmt_enable(tx_chan_handle));
 
-    olt_tx_queue = xQeueCreate(5,sizeof(olt_packet_t));
+    olt_tx_queue = xQueueCreate(5,sizeof(olt_packet_t));
 
     xTaskCreate(olt_tx_task,"olt_tx_task",2048*4,NULL,5,&olt_tx_task_handle);
 
@@ -143,7 +144,7 @@ esp_err_t olt_tx_channel_deinit(void)
     return ESP_OK;
 }
 
-
+#if 0
 static bool rmt_rx_done_callback(rmt_channel_handle_t channel, const rmt_rx_done_event_data_t *edata, void *user_data)
 {
     BaseType_t high_task_wakeup = pdFALSE;
@@ -208,18 +209,21 @@ esp_err_t olt_rx_data(olt_rx_data_t data,TickType_t xTicksToWait)
 {
 
 }
+#endif
 
+#include "logic_analyzer_ws_server.h"
 int app_main()
 {
+    logic_analyzer_ws_server();
 //    olt_rx_channels_init();
     olt_tx_channel_init();
     while(1)
     {
         olt_packet_t tx_data;
-        data.val = 0x8000;
-        olt_tx_data(data);
+        tx_data.val = 0x80000010;
+        olt_tx_data(tx_data);
 //        olt_rx_data(rx_data,portMAX_DELAY);
-        vTaskDelay(1);
+        vTaskDelay(10);
     }
 }
 

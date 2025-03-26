@@ -1,6 +1,6 @@
 
 typedef union {
-    struct shot_packet
+    struct 
     {
         uint32_t free:10;
         uint32_t player_id_ext:8;
@@ -8,14 +8,14 @@ typedef union {
         uint32_t team:2;
         uint32_t player_id_base:7;
         uint32_t shot_long_bit:1;
-    };
-    struct long_packet
+    } shot_packet;
+    struct 
     {
         uint32_t byte_ext:8;
         uint32_t byte_3:8;
         uint32_t byte_2:8;
         uint32_t byte_1:8;
-    };
+    } long_packet;
     uint32_t val;
 } olt_packet_t;
 
