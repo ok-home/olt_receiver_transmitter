@@ -19,7 +19,7 @@
 
 
 #define OLT_TX_PIN 2
-#define OLT_RX_PIN 4
+#define OLT_RX_PIN 2
 
 #define OLT_RMT_CLK 1*1000*1000 // 1 MHz
 #define OLT_RMT_TICK 600 // 600 mksek
@@ -57,7 +57,15 @@ static TaskHandle_t olt_tx_task_handle = 0;
 
 static rmt_channel_handle_t tx_chan_handle = NULL;
 static rmt_encoder_handle_t tx_encoder = NULL;
-static rmt_channel_handle_t rx_chan = NULL;
+
+static rmt_channel_handle_t rx_chan_handle = NULL;
+static rmt_receive_config_t receive_config = {
+    .signal_range_min_ns = 10,                       // the shortest duration
+    .signal_range_max_ns = OLT_RMT_TICK*8*1000, // the longest duration 4800 mks
+};
+
+
+static rmt_symbol_word_t olt_channel_rx_data[OLT_CHANNEL_SIZE] = {0};
 
 
 static size_t olt_tx_rmt_decode(olt_packet_t data_in, rmt_symbol_word_t *data_out)
@@ -144,7 +152,7 @@ esp_err_t olt_tx_channel_deinit(void)
     return ESP_OK;
 }
 
-#if 0
+#if 1
 static bool rmt_rx_done_callback(rmt_channel_handle_t channel, const rmt_rx_done_event_data_t *edata, void *user_data)
 {
     BaseType_t high_task_wakeup = pdFALSE;
@@ -167,64 +175,84 @@ esp_err_t olt_rx_channels_init()
         .flags.with_dma = false,               // do not need DMA backend
         .flags.io_loop_back = 1,
     };
-    ESP_ERROR_CHECK(rmt_new_rx_channel(&rx_chan_config, &rx_chan));
+    ESP_ERROR_CHECK(rmt_new_rx_channel(&rx_chan_config, &rx_chan_handle));
     olt_rx_queue = xQueueCreate(10, sizeof(rmt_rx_done_event_data_t));
     rmt_rx_event_callbacks_t cbs = {
         .on_recv_done = rmt_rx_done_callback,
     };
-    ESP_ERROR_CHECK(rmt_rx_register_event_callbacks(rx_chan, &cbs, olt_rx_queue));
+    ESP_ERROR_CHECK(rmt_rx_register_event_callbacks(rx_chan_handle, &cbs, olt_rx_queue));
 
-    ESP_ERROR_CHECK(rmt_enable(rx_chan));
-    rmt_receive_config_t receive_config = {
-        .signal_range_min_ns = 10,                       // the shortest duration
-        .signal_range_max_ns = OLT_RMT_TICK*8*1000*1000, // the longest duration 4800 mks
-    };
+    ESP_ERROR_CHECK(rmt_enable(rx_chan_handle));
 
-    ESP_ERROR_CHECK(rmt_receive(rx_chan, rmt_tools_cfg.rmt_data_in, sizeof(rmt_tools_cfg.rmt_data_in), &receive_config));
-    rmt_rx_done_event_data_t rx_data;
-
-    if (xQueueReceive(receive_queue, &rx_data, 10000 / portTICK_PERIOD_MS) == pdFALSE)
-    {
-        ESP_LOGI(TAG, "RMT Recrive timeout 10 sec");
-    }
-    else
-    {
-        ESP_LOGI(TAG, "RMT Recrive data");
-    }
+    return ESP_OK;
 
 }
 esp_err_t olt_rx_channels_deinit(void)
 {
-    rmt_disable(rx_chan);
+    rmt_disable(rx_chan_handle);
     rmt_rx_event_callbacks_t cbs = {
         .on_recv_done = NULL,
     };
-    rmt_rx_register_event_callbacks(rx_chan, &cbs, receive_queue);
-    rmt_del_channel(rx_chan);
+    rmt_rx_register_event_callbacks(rx_chan_handle, &cbs, NULL);
+    rmt_del_channel(rx_chan_handle);
     vQueueDelete(olt_rx_queue);
     ESP_LOGI(TAG, "Receive OK");
-
+    return ESP_OK;
 }
 esp_err_t olt_rx_data(olt_rx_data_t data,TickType_t xTicksToWait)
 {
+    rmt_rx_done_event_data_t rx_data;
 
+    ESP_ERROR_CHECK(rmt_receive(rx_chan_handle, olt_channel_rx_data, sizeof(olt_channel_rx_data)*sizeof(rmt_symbol_word_t), &receive_config));
+    if (xQueueReceive(olt_rx_queue, &rx_data, xTicksToWait) == pdFALSE)
+    {
+        ESP_LOGI(TAG, "RMT Recive timeout ");
+    }
+    else
+    {
+        ESP_LOGI(TAG, "RMT Recive %d bits", rx_data.num_symbols);
+    }
+    // next receive
+    return ESP_OK;
 }
 #endif
+void test_tx(void *p){
+    olt_packet_t tx_data;
+    while(1){
+        tx_data.val = 0x80000000;
+        olt_tx_data(tx_data);
+        vTaskDelay(10);
+    }
+}
+void test_rx(void *p){
+    olt_rx_data_t rx_data;
+    while(1){
+        olt_rx_data(rx_data,portMAX_DELAY);
+    }
+}
+
 
 #include "logic_analyzer_ws_server.h"
 int app_main()
 {
     logic_analyzer_ws_server();
-//    olt_rx_channels_init();
+
+    olt_rx_channels_init();
     olt_tx_channel_init();
+
+    int *channel = (int*)tx_chan_handle;// hack - number rmt channel -> first int in struct tx_chan_handle
+    ESP_LOGI(TAG,"tx channel =%d",*channel);
+    channel = (int*)rx_chan_handle;
+    ESP_LOGI(TAG,"rx channel =%d",*channel);
+
+    xTaskCreate(test_tx,"test_tx",2048*2,NULL,5,NULL);
+    xTaskCreate(test_rx,"test_rx",2048*2,NULL,5,NULL);
+    
     while(1)
     {
-        olt_packet_t tx_data;
-        tx_data.val = 0x80000010;
-        olt_tx_data(tx_data);
-//        olt_rx_data(rx_data,portMAX_DELAY);
-        vTaskDelay(10);
+        vTaskDelay(100);
     }
+    return ESP_OK;
 }
 
 
