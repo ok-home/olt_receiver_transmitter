@@ -19,7 +19,9 @@
 
 
 #define OLT_TX_PIN 2
-#define OLT_RX_PIN 2
+#define OLT_RX_CHANNELS_NUM 4
+
+static const gpio_num_t olt_rx_gpio[OLT_RX_CHANNELS_NUM] = {2,5,6,7}
 
 #define OLT_RMT_CLK 1*1000*1000 // 1 MHz
 #define OLT_RMT_TICK 600 // 600 mksek
@@ -45,10 +47,15 @@ static const rmt_symbol_word_t olt_rmt_zero = {
 };
 static const rmt_symbol_word_t olt_rmt_stop = {
     .level0 = 0,
-    .duration0 = 0,
+    .duration0 = OLT_RMT_TICK*2, // pause 1200 mksek ??
     .level1 = 0,
-    .duration1 = 0,
+    .duration1 = 0,             //  stop
 };
+static const rmt_receive_config_t receive_config = {
+    .signal_range_min_ns = 10,                       // the shortest duration
+    .signal_range_max_ns = OLT_RMT_TICK*5*1000, // the longest duration 3000 mks
+};
+
 
 static QueueHandle_t olt_tx_queue = 0;
 static QueueHandle_t olt_rx_queue = 0;
@@ -58,14 +65,20 @@ static TaskHandle_t olt_tx_task_handle = 0;
 static rmt_channel_handle_t tx_chan_handle = NULL;
 static rmt_encoder_handle_t tx_encoder = NULL;
 
-static rmt_channel_handle_t rx_chan_handle = NULL;
-static rmt_receive_config_t receive_config = {
-    .signal_range_min_ns = 10,                       // the shortest duration
-    .signal_range_max_ns = OLT_RMT_TICK*8*1000, // the longest duration 4800 mks
-};
+typedef struct rmt_rx_channel_param
+{
+    gpio_num_t rx_chan_gpio;
+    rmt_channel_handle_t rx_chan_handle;
+    rmt_symbol_word_t olt_channel_rx_data[OLT_CHANNEL_SIZE];
+} rmt_rx_channel_param_t;
+typedef struct rx_queue_channels_data
+{
+    uint32_t channel;
+    rmt_rx_done_event_data_t rmt_event_data;
+} rx_queue_channels_data_t
 
 
-static rmt_symbol_word_t olt_channel_rx_data[OLT_CHANNEL_SIZE] = {0};
+static rmt_rx_channel_param_t rmt_channels_param[OLT_RX_CHANNELS_NUM];
 
 
 static size_t olt_tx_rmt_decode(olt_packet_t data_in, rmt_symbol_word_t *data_out)
@@ -86,7 +99,7 @@ static size_t olt_tx_rmt_decode(olt_packet_t data_in, rmt_symbol_word_t *data_ou
     data_out[i] = olt_rmt_stop;
     return i;
 }
-
+// can it be removed ?
 static void olt_tx_task(void* p)
 {
     ESP_LOGI(TAG,"Create tx task");
@@ -156,61 +169,109 @@ esp_err_t olt_tx_channel_deinit(void)
 static bool rmt_rx_done_callback(rmt_channel_handle_t channel, const rmt_rx_done_event_data_t *edata, void *user_data)
 {
     BaseType_t high_task_wakeup = pdFALSE;
-    QueueHandle_t receive_queue = (QueueHandle_t)user_data;
+    rx_queue_channels_data_t q_data;
+    q_data.channel = (uint32_t)user_data;
+    memcpy(&q_data.rmt_event_data,edata,sizeof(rmt_rx_done_event_data_t));
     // send the received RMT symbols to the parser task
-    xQueueSendFromISR(receive_queue, edata, &high_task_wakeup);
+    xQueueSendFromISR(olt_rx_queue, &q_data, &high_task_wakeup);
     // return whether any task is woken up
     return high_task_wakeup == pdTRUE;
 }
 esp_err_t olt_rx_channels_init()
 {
     ESP_LOGI(TAG, "Start receive");
-
     rmt_rx_channel_config_t rx_chan_config = {
         .clk_src = RMT_CLK_SRC_DEFAULT,        // select source clock
         .resolution_hz = OLT_RMT_CLK, // tick resolution, 
         .mem_block_symbols = OLT_CHANNEL_SIZE,  // memory block size, 48/64
-        .gpio_num = OLT_RX_PIN,                 // GPIO number
         .flags.invert_in = false,              // do not invert input signal
         .flags.with_dma = false,               // do not need DMA backend
         .flags.io_loop_back = 1,
     };
-    ESP_ERROR_CHECK(rmt_new_rx_channel(&rx_chan_config, &rx_chan_handle));
-    olt_rx_queue = xQueueCreate(10, sizeof(rmt_rx_done_event_data_t));
     rmt_rx_event_callbacks_t cbs = {
         .on_recv_done = rmt_rx_done_callback,
     };
-    ESP_ERROR_CHECK(rmt_rx_register_event_callbacks(rx_chan_handle, &cbs, olt_rx_queue));
+    olt_rx_queue = xQueueCreate(10, sizeof(rx_queue_channels_data_t));
 
-    ESP_ERROR_CHECK(rmt_enable(rx_chan_handle));
-
+    for(int ch = 0;ch < OLT_RX_CHANNELS_NUM;ch++){
+        rmt_channels_param[ch].rx_chan_gpio = olt_rx_gpio[ch];
+        rx_chan_config.gpio_num = rmt_channels_param[ch].rx_chan_gpio,                 // GPIO number
+        ESP_ERROR_CHECK(rmt_new_rx_channel(&rx_chan_config, &(rmt_channels_param[ch].rx_chan_handle)));
+        ESP_ERROR_CHECK(rmt_rx_register_event_callbacks(rmt_channels_param[ch].rx_chan_handle, &cbs, ch));
+        ESP_ERROR_CHECK(rmt_enable(rmt_channels_param[ch].rx_chan_handle));
+        ESP_ERROR_CHECK(rmt_receive(rmt_channels_param[ch].rx_chan_handle, rmt_channels_param[ch].olt_channel_rx_data, sizeof(rmt_channels_param[ch].olt_channel_rx_data), &receive_config));
+    }
     return ESP_OK;
 
 }
 esp_err_t olt_rx_channels_deinit(void)
 {
-    rmt_disable(rx_chan_handle);
     rmt_rx_event_callbacks_t cbs = {
         .on_recv_done = NULL,
     };
-    rmt_rx_register_event_callbacks(rx_chan_handle, &cbs, NULL);
-    rmt_del_channel(rx_chan_handle);
+
+    for(int ch = 0;ch < OLT_RX_CHANNELS_NUM;ch++){
+        rmt_disable(rmt_channels_param[ch].rx_chan_handle);
+        rmt_rx_register_event_callbacks(rmt_channels_param[ch].rx_chan_handle, &cbs, NULL);
+        rmt_del_channel(rmt_channels_param[ch].rx_chan_handle);
+    }
     vQueueDelete(olt_rx_queue);
     ESP_LOGI(TAG, "Receive OK");
+
     return ESP_OK;
 }
-esp_err_t olt_rx_data(olt_rx_data_t data,TickType_t xTicksToWait)
-{
-    rmt_rx_done_event_data_t rx_data;
 
-    ESP_ERROR_CHECK(rmt_receive(rx_chan_handle, olt_channel_rx_data, sizeof(olt_channel_rx_data)*sizeof(rmt_symbol_word_t), &receive_config));
+static esp_err_t olt_rx_encode(olt_rx_data_t *olt_data, rx_queue_channels_data_t *rmt_data)
+{
+    olt_data->channel = rmt_data->channel;
+    size_t size = rmt_data->rmt_event_data.numb_symbols;
+    rmt_symbol_word_t *buf = rmt_data->rmt_event_data.received_symbols;
+    uint32_t enc_data = 0;
+    switch(size)
+    {
+        case 23:
+        case 25:
+        case 33:
+            break;
+        default:
+        ESP_LOGE(TAG,"ERR bit count %d out of range",size);
+        return ESP_ERR;
+    }
+    if ( buf[0].duration0 > (OLT_RMT_TICK*4+OLT_RMT_TICK/2) || buf[0].duration0 < (OLT_RMT_TICK*4-OLT_RMT_TICK/2) )
+    {
+        ESP_LOGE(TAG,"ERR start bit duration %d out of range",buf[0].duration0);
+        return ESP_ERR; // out of range
+    }
+
+    for(int i = 1; i < 33 ; i++ )
+    {
+        if(i>size){enc_data <<= 1; continue;}  // last bits zero
+        if(buf[i].duration0 < (OLT_RMT_TICK*2+OLT_RMT_TICK/2) && buf[i].duration0 > (OLT_RMT_TICK*2-OLT_RMT_TICK/2) )
+            {enc_data |= 0x1; enc_data <<= 1; continue;} // one
+        if(buf[i].duration0 < (OLT_RMT_TICK*1+OLT_RMT_TICK/2) && buf[i].duration0 > (OLT_RMT_TICK*1-OLT_RMT_TICK/2) )
+            {enc_data <<= 1; continue;} // zero
+
+            ESP_LOGE(TAG,"ERR bits duration %d out of range",buf[i].duration0);
+        return ESP_ERR; // out of range
+    }
+    return ESP_OK;
+}
+
+esp_err_t olt_rx_data(olt_rx_data_t *olt_data,TickType_t xTicksToWait)
+{
+    rx_queue_channels_data_t rx_data;
+
     if (xQueueReceive(olt_rx_queue, &rx_data, xTicksToWait) == pdFALSE)
     {
         ESP_LOGI(TAG, "RMT Recive timeout ");
     }
     else
     {
-        ESP_LOGI(TAG, "RMT Recive %d bits", rx_data.num_symbols);
+        ESP_LOGI(TAG, "RMT Recive %d bits from channel %d with ptr %p", rx_data.rmt_event_data.num_symbols,rx_data.channel,rx_data.rmt_event_data.received_symbols);
+
+        olt_rx_encode(olt_data, &rx_data);
+
+        ESP_ERROR_CHECK(rmt_receive(rmt_channels_param[rx_data.channel].rx_chan_handle, rmt_channels_param[rx_data.channel].olt_channel_rx_data, sizeof(rmt_channels_param[rx_data.channel].olt_channel_rx_data), &receive_config));
     }
     // next receive
     return ESP_OK;
