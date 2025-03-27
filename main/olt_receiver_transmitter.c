@@ -165,7 +165,6 @@ esp_err_t olt_tx_channel_deinit(void)
     return ESP_OK;
 }
 
-#if 1
 static bool rmt_rx_done_callback(rmt_channel_handle_t channel, const rmt_rx_done_event_data_t *edata, void *user_data)
 {
     BaseType_t high_task_wakeup = pdFALSE;
@@ -270,13 +269,14 @@ esp_err_t olt_rx_data(olt_rx_data_t *olt_data,TickType_t xTicksToWait)
         ESP_LOGI(TAG, "RMT Recive %d bits from channel %d with ptr %p", rx_data.rmt_event_data.num_symbols,rx_data.channel,rx_data.rmt_event_data.received_symbols);
 
         olt_rx_encode(olt_data, &rx_data);
+        ESP_LOGI(TAG,"Received data %lx, on channel %d",olt_data.data.val,olt_data.channel);
 
         ESP_ERROR_CHECK(rmt_receive(rmt_channels_param[rx_data.channel].rx_chan_handle, rmt_channels_param[rx_data.channel].olt_channel_rx_data, sizeof(rmt_channels_param[rx_data.channel].olt_channel_rx_data), &receive_config));
     }
     // next receive
     return ESP_OK;
 }
-#endif
+
 void test_tx(void *p){
     olt_packet_t tx_data;
     while(1){
@@ -300,11 +300,6 @@ int app_main()
 
     olt_rx_channels_init();
     olt_tx_channel_init();
-
-    int *channel = (int*)tx_chan_handle;// hack - number rmt channel -> first int in struct tx_chan_handle
-    ESP_LOGI(TAG,"tx channel =%d",*channel);
-    channel = (int*)rx_chan_handle;
-    ESP_LOGI(TAG,"rx channel =%d",*channel);
 
     xTaskCreate(test_tx,"test_tx",2048*2,NULL,5,NULL);
     xTaskCreate(test_rx,"test_rx",2048*2,NULL,5,NULL);
