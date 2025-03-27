@@ -69,7 +69,6 @@ static rmt_encoder_handle_t tx_encoder = NULL;
 
 typedef struct rmt_rx_channel_param
 {
-    gpio_num_t rx_chan_gpio;
     rmt_channel_handle_t rx_chan_handle;
     rmt_symbol_word_t olt_channel_rx_data[OLT_CHANNEL_SIZE];
 } rmt_rx_channel_param_t;
@@ -167,7 +166,7 @@ esp_err_t olt_tx_channel_deinit(void)
     return ESP_OK;
 }
 
-static bool rmt_rx_done_callback(rmt_channel_handle_t channel, const rmt_rx_done_event_data_t *edata, void *user_data)
+static bool IRAM_ATTR rmt_rx_done_callback(rmt_channel_handle_t channel, const rmt_rx_done_event_data_t *edata, void *user_data)
 {
     BaseType_t high_task_wakeup = pdFALSE;
     rx_queue_channels_data_t q_data;
@@ -195,8 +194,7 @@ esp_err_t olt_rx_channels_init()
     olt_rx_queue = xQueueCreate(10, sizeof(rx_queue_channels_data_t));
 
     for(int ch = 0;ch < OLT_RX_CHANNELS_NUM;ch++){
-        rmt_channels_param[ch].rx_chan_gpio = olt_rx_gpio[ch];
-        rx_chan_config.gpio_num = rmt_channels_param[ch].rx_chan_gpio;                // GPIO number
+        rx_chan_config.gpio_num = olt_rx_gpio[ch];                // GPIO number
         ESP_ERROR_CHECK(rmt_new_rx_channel(&rx_chan_config, &(rmt_channels_param[ch].rx_chan_handle)));
         ESP_ERROR_CHECK(rmt_rx_register_event_callbacks(rmt_channels_param[ch].rx_chan_handle, &cbs, (void*)ch));
         ESP_ERROR_CHECK(rmt_enable(rmt_channels_param[ch].rx_chan_handle));
@@ -238,7 +236,7 @@ static esp_err_t olt_rx_encode(olt_rx_data_t *olt_data, rx_queue_channels_data_t
         ESP_LOGE(TAG,"ERR bit count %d out of range",size);
         return ESP_FAIL;
     }
-    if ( buf[0].duration0 > (OLT_RMT_TICK*4+OLT_RMT_TICK/2) || buf[0].duration0 < (OLT_RMT_TICK*4-OLT_RMT_TICK/2) )
+    if ( buf[0].duration0 > (OLT_RMT_TICK*4+OLT_RMT_TICK/3) || buf[0].duration0 < (OLT_RMT_TICK*4-OLT_RMT_TICK/3) )
     {
         ESP_LOGE(TAG,"ERR start bit duration %d out of range",buf[0].duration0);
         return ESP_FAIL; // out of range
@@ -249,9 +247,9 @@ static esp_err_t olt_rx_encode(olt_rx_data_t *olt_data, rx_queue_channels_data_t
         enc_data <<= 1;
 //        ESP_LOGI(TAG,"lvl=%d dur=%d, enc=%lx",buf[i].level0,buf[i].duration0,enc_data);
         if(i>=size){ continue;}  // last bits zero
-        if(buf[i].duration0 < (OLT_RMT_TICK*2+OLT_RMT_TICK/2) && buf[i].duration0 > (OLT_RMT_TICK*2-OLT_RMT_TICK/2) )
+        if(buf[i].duration0 < (OLT_RMT_TICK*2+OLT_RMT_TICK/3) && buf[i].duration0 > (OLT_RMT_TICK*2-OLT_RMT_TICK/3) )
             {enc_data |= 0x1;  continue;} // one
-        if(buf[i].duration0 < (OLT_RMT_TICK*1+OLT_RMT_TICK/2) && buf[i].duration0 > (OLT_RMT_TICK*1-OLT_RMT_TICK/2) )
+        if(buf[i].duration0 < (OLT_RMT_TICK*1+OLT_RMT_TICK/3) && buf[i].duration0 > (OLT_RMT_TICK*1-OLT_RMT_TICK/3) )
             { continue;} // zero
 
             ESP_LOGE(TAG,"ERR bits %d duration %d out of range",i,buf[i].duration0);
