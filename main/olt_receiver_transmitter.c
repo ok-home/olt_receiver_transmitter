@@ -12,6 +12,7 @@
 #include "esp_log.h"
 #include "driver/rmt_tx.h"
 #include "driver/rmt_rx.h"
+#include "driver/gpio.h"
 
 
 #include "olt_receiver_transmitter.h"
@@ -47,9 +48,15 @@ static const rmt_symbol_word_t olt_rmt_zero = {
     .level1 = 0,
     .duration1 = OLT_RMT_TICK,
 };
+static const rmt_symbol_word_t olt_rmt_pause = {
+    .level0 = 0,
+    .duration0 = OLT_RMT_TICK*5, // pause 3000 mksek ??
+    .level1 = 0,
+    .duration1 = OLT_RMT_TICK*5,             //  stop
+};
 static const rmt_symbol_word_t olt_rmt_stop = {
     .level0 = 0,
-    .duration0 = OLT_RMT_TICK*2, // pause 1200 mksek ??
+    .duration0 = 0, 
     .level1 = 0,
     .duration1 = 0,             //  stop
 };
@@ -97,6 +104,7 @@ static size_t olt_tx_rmt_decode(olt_packet_t data_in, rmt_symbol_word_t *data_ou
         data_out[i] = (mask & data_in.val) ?  olt_rmt_one : olt_rmt_zero;
         mask >>= 1;
     }
+    data_out[i++] = olt_rmt_pause;
     data_out[i] = olt_rmt_stop;
     return i;
 }
@@ -132,7 +140,7 @@ esp_err_t olt_tx_channel_init(void)
         .mem_block_symbols = OLT_CHANNEL_SIZE,
         .flags.io_loop_back = 1,    // gpio output/input mode // for test only
         .resolution_hz = OLT_RMT_CLK,
-        .trans_queue_depth = 5, // set the maximum number of transactions that can pend in the background
+        .trans_queue_depth = 10, // set the maximum number of transactions that can pend in the background
     };
     ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_chan_config, &tx_chan_handle));
 
@@ -150,7 +158,7 @@ esp_err_t olt_tx_channel_init(void)
     ESP_ERROR_CHECK(rmt_new_copy_encoder(&tx_encoder_config, &tx_encoder));
     ESP_ERROR_CHECK(rmt_enable(tx_chan_handle));
 
-    olt_tx_queue = xQueueCreate(5,sizeof(olt_packet_t));
+    olt_tx_queue = xQueueCreate(10,sizeof(olt_packet_t));
 
     xTaskCreate(olt_tx_task,"olt_tx_task",2048*4,NULL,5,&olt_tx_task_handle);
 
@@ -269,8 +277,12 @@ esp_err_t olt_rx_data(olt_rx_data_t *olt_data,TickType_t xTicksToWait)
     }
     else
     {
+        gpio_set_level(4,1);
         olt_rx_encode(olt_data, &rx_data);
+        gpio_set_level(4,0);
         ESP_ERROR_CHECK(rmt_receive(rmt_channels_param[rx_data.channel].rx_chan_handle, rmt_channels_param[rx_data.channel].olt_channel_rx_data, sizeof(rmt_channels_param[rx_data.channel].olt_channel_rx_data), &receive_config));
+
+
     }
     // next receive
     return ESP_OK;
@@ -279,16 +291,20 @@ esp_err_t olt_rx_data(olt_rx_data_t *olt_data,TickType_t xTicksToWait)
 void test_tx(void *p){
     olt_packet_t tx_data;
     while(1){
+        tx_data.val = 0x81000000;
+        olt_tx_data(tx_data);
         tx_data.val = 0x11000000;
         olt_tx_data(tx_data);
-        vTaskDelay(10);
+        tx_data.val = 0x81000001;
+        olt_tx_data(tx_data);
+        vTaskDelay(100);
     }
 }
 void test_rx(void *p){
     olt_rx_data_t rx_data;
     while(1){
         olt_rx_data(&rx_data,portMAX_DELAY);
-        ESP_LOGI(TAG,"Received data %lx, on channel %ld",rx_data.data.val,rx_data.channel);
+        //ESP_LOGI(TAG,"Received data %lx, on channel %ld",rx_data.data.val,rx_data.channel);
     }
 }
 
@@ -297,6 +313,10 @@ void test_rx(void *p){
 int app_main()
 {
     logic_analyzer_ws_server();
+
+    gpio_reset_pin(4);
+    gpio_set_direction(4,GPIO_MODE_OUTPUT);
+    gpio_set_level(4,0);
 
     olt_rx_channels_init();
     olt_tx_channel_init();
