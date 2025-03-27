@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Unlicense OR CC0-1.0
  */
 
+#include <stdio.h>
+#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -19,13 +21,13 @@
 
 
 #define OLT_TX_PIN 2
-#define OLT_RX_CHANNELS_NUM 4
+#define OLT_RX_CHANNELS_NUM 7
 
-static const gpio_num_t olt_rx_gpio[OLT_RX_CHANNELS_NUM] = {2,5,6,7}
+static const gpio_num_t olt_rx_gpio[OLT_RX_CHANNELS_NUM] = {2,2,2,2,2,2,2};
 
 #define OLT_RMT_CLK 1*1000*1000 // 1 MHz
 #define OLT_RMT_TICK 600 // 600 mksek
-#define OLT_CHANNEL_SIZE 48 // 48->esp32s3 64->esp32
+#define OLT_CHANNEL_SIZE 64 // 48->esp32s3 64->esp32
 
 static const rmt_symbol_word_t olt_rmt_start = {
     .level0 = 1,
@@ -75,7 +77,7 @@ typedef struct rx_queue_channels_data
 {
     uint32_t channel;
     rmt_rx_done_event_data_t rmt_event_data;
-} rx_queue_channels_data_t
+} rx_queue_channels_data_t;
 
 
 static rmt_rx_channel_param_t rmt_channels_param[OLT_RX_CHANNELS_NUM];
@@ -145,7 +147,7 @@ esp_err_t olt_tx_channel_init(void)
     ESP_ERROR_CHECK(rmt_apply_carrier(tx_chan_handle, &tx_carrier_cfg));
 #endif
 
-    rmt_copy_encoder_config_t tx_encoder_config = {0};
+    rmt_copy_encoder_config_t tx_encoder_config = {};
     ESP_ERROR_CHECK(rmt_new_copy_encoder(&tx_encoder_config, &tx_encoder));
     ESP_ERROR_CHECK(rmt_enable(tx_chan_handle));
 
@@ -194,9 +196,9 @@ esp_err_t olt_rx_channels_init()
 
     for(int ch = 0;ch < OLT_RX_CHANNELS_NUM;ch++){
         rmt_channels_param[ch].rx_chan_gpio = olt_rx_gpio[ch];
-        rx_chan_config.gpio_num = rmt_channels_param[ch].rx_chan_gpio,                 // GPIO number
+        rx_chan_config.gpio_num = rmt_channels_param[ch].rx_chan_gpio;                // GPIO number
         ESP_ERROR_CHECK(rmt_new_rx_channel(&rx_chan_config, &(rmt_channels_param[ch].rx_chan_handle)));
-        ESP_ERROR_CHECK(rmt_rx_register_event_callbacks(rmt_channels_param[ch].rx_chan_handle, &cbs, ch));
+        ESP_ERROR_CHECK(rmt_rx_register_event_callbacks(rmt_channels_param[ch].rx_chan_handle, &cbs, (void*)ch));
         ESP_ERROR_CHECK(rmt_enable(rmt_channels_param[ch].rx_chan_handle));
         ESP_ERROR_CHECK(rmt_receive(rmt_channels_param[ch].rx_chan_handle, rmt_channels_param[ch].olt_channel_rx_data, sizeof(rmt_channels_param[ch].olt_channel_rx_data), &receive_config));
     }
@@ -223,7 +225,7 @@ esp_err_t olt_rx_channels_deinit(void)
 static esp_err_t olt_rx_encode(olt_rx_data_t *olt_data, rx_queue_channels_data_t *rmt_data)
 {
     olt_data->channel = rmt_data->channel;
-    size_t size = rmt_data->rmt_event_data.numb_symbols;
+    size_t size = rmt_data->rmt_event_data.num_symbols;
     rmt_symbol_word_t *buf = rmt_data->rmt_event_data.received_symbols;
     uint32_t enc_data = 0;
     switch(size)
@@ -234,25 +236,28 @@ static esp_err_t olt_rx_encode(olt_rx_data_t *olt_data, rx_queue_channels_data_t
             break;
         default:
         ESP_LOGE(TAG,"ERR bit count %d out of range",size);
-        return ESP_ERR;
+        return ESP_FAIL;
     }
     if ( buf[0].duration0 > (OLT_RMT_TICK*4+OLT_RMT_TICK/2) || buf[0].duration0 < (OLT_RMT_TICK*4-OLT_RMT_TICK/2) )
     {
         ESP_LOGE(TAG,"ERR start bit duration %d out of range",buf[0].duration0);
-        return ESP_ERR; // out of range
+        return ESP_FAIL; // out of range
     }
-
+//    ESP_LOGI(TAG,"lvl=%d dur=%d, enc=%lx",buf[0].level0,buf[0].duration0,enc_data);
     for(int i = 1; i < 33 ; i++ )
     {
-        if(i>size){enc_data <<= 1; continue;}  // last bits zero
+        enc_data <<= 1;
+//        ESP_LOGI(TAG,"lvl=%d dur=%d, enc=%lx",buf[i].level0,buf[i].duration0,enc_data);
+        if(i>=size){ continue;}  // last bits zero
         if(buf[i].duration0 < (OLT_RMT_TICK*2+OLT_RMT_TICK/2) && buf[i].duration0 > (OLT_RMT_TICK*2-OLT_RMT_TICK/2) )
-            {enc_data |= 0x1; enc_data <<= 1; continue;} // one
+            {enc_data |= 0x1;  continue;} // one
         if(buf[i].duration0 < (OLT_RMT_TICK*1+OLT_RMT_TICK/2) && buf[i].duration0 > (OLT_RMT_TICK*1-OLT_RMT_TICK/2) )
-            {enc_data <<= 1; continue;} // zero
+            { continue;} // zero
 
-            ESP_LOGE(TAG,"ERR bits duration %d out of range",buf[i].duration0);
-        return ESP_ERR; // out of range
+            ESP_LOGE(TAG,"ERR bits %d duration %d out of range",i,buf[i].duration0);
+        return ESP_FAIL; // out of range
     }
+    olt_data->data.val = enc_data;
     return ESP_OK;
 }
 
@@ -266,11 +271,7 @@ esp_err_t olt_rx_data(olt_rx_data_t *olt_data,TickType_t xTicksToWait)
     }
     else
     {
-        ESP_LOGI(TAG, "RMT Recive %d bits from channel %d with ptr %p", rx_data.rmt_event_data.num_symbols,rx_data.channel,rx_data.rmt_event_data.received_symbols);
-
         olt_rx_encode(olt_data, &rx_data);
-        ESP_LOGI(TAG,"Received data %lx, on channel %d",olt_data.data.val,olt_data.channel);
-
         ESP_ERROR_CHECK(rmt_receive(rmt_channels_param[rx_data.channel].rx_chan_handle, rmt_channels_param[rx_data.channel].olt_channel_rx_data, sizeof(rmt_channels_param[rx_data.channel].olt_channel_rx_data), &receive_config));
     }
     // next receive
@@ -280,7 +281,7 @@ esp_err_t olt_rx_data(olt_rx_data_t *olt_data,TickType_t xTicksToWait)
 void test_tx(void *p){
     olt_packet_t tx_data;
     while(1){
-        tx_data.val = 0x80000000;
+        tx_data.val = 0x11000000;
         olt_tx_data(tx_data);
         vTaskDelay(10);
     }
@@ -288,7 +289,8 @@ void test_tx(void *p){
 void test_rx(void *p){
     olt_rx_data_t rx_data;
     while(1){
-        olt_rx_data(rx_data,portMAX_DELAY);
+        olt_rx_data(&rx_data,portMAX_DELAY);
+        ESP_LOGI(TAG,"Received data %lx, on channel %ld",rx_data.data.val,rx_data.channel);
     }
 }
 
