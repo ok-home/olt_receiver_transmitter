@@ -163,6 +163,7 @@ esp_err_t olt_tx_channel_free(void)
 static esp_err_t IRAM_ATTR olt_rx_encode(uint32_t *enc_data, const rmt_rx_done_event_data_t *rmt_event_data)
 {
     *enc_data = 0;
+    size_t size = rmt_event_data->num_symbols; // packet size
     switch(size) 
     {
         case 23:
