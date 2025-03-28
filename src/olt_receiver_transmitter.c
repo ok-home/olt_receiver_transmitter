@@ -150,7 +150,7 @@ esp_err_t olt_tx_channel_init(void)
 
     return ESP_OK; // allready ESP_OK,  error detected on ESP_ERROR_CHECK
 }
-// disable rvt channel & free all resource
+// disable rmt tx channel & free all resource
 esp_err_t olt_tx_channel_free(void)
 {
     rmt_disable(tx_chan_handle);
@@ -196,6 +196,7 @@ static esp_err_t IRAM_ATTR olt_rx_encode(uint32_t *enc_data, const rmt_rx_done_e
 // rmt callback, call when rmt packet received
 // user data -> channel number from olt_rx_gpio[OLT_RX_CHANNELS_NUM]
 // encode data, restart receive, send encoded data to receive queue
+// already return ESP_OK, error detected ESP_ERROR_CHECK
 static bool IRAM_ATTR rmt_rx_done_callback(rmt_channel_handle_t channel_handle, const rmt_rx_done_event_data_t *edata, void *user_data)
 {
     BaseType_t high_task_wakeup = pdFALSE;
@@ -211,25 +212,24 @@ static bool IRAM_ATTR rmt_rx_done_callback(rmt_channel_handle_t channel_handle, 
     // return whether any task is woken up
     return high_task_wakeup == pdTRUE;
 }
-// init all rx channels
+// init all rx channels, create received queue, start first receive
 // the number of channels and connection to the gpio is determined olt_rx_gpio[OLT_RX_CHANNELS_NUM]
-// 
 esp_err_t olt_rx_channels_init()
 {
     ESP_LOGI(TAG, "Init all rx channels");
     rmt_rx_channel_config_t rx_chan_config = {
-        .clk_src = RMT_CLK_SRC_DEFAULT,        // select source clock
-        .resolution_hz = OLT_RMT_CLK, // tick resolution, 
+        .clk_src = RMT_CLK_SRC_DEFAULT,         // select source clock
+        .resolution_hz = OLT_RMT_CLK,           // tick resolution, 
         .mem_block_symbols = OLT_CHANNEL_SIZE,  // memory block size, 48/64
-        .flags.invert_in = false,              // do not invert input signal
-        .flags.with_dma = false,               // do not need DMA backend
+        .flags.invert_in = false,               // do not invert input signal
+        .flags.with_dma = false,                // do not need DMA backend
         .flags.io_loop_back = 1,
     };
     rmt_rx_event_callbacks_t cbs = {
         .on_recv_done = rmt_rx_done_callback,
     };
     olt_rx_queue = xQueueCreate(10, sizeof(olt_rx_data_t));
-
+    // init all received channels
     for(int ch = 0;ch < OLT_RX_CHANNELS_NUM;ch++){
         rx_chan_config.gpio_num = olt_rx_gpio[ch];                // GPIO number
         ESP_ERROR_CHECK(rmt_new_rx_channel(&rx_chan_config, &(rmt_channels_param[ch].rx_chan_handle)));
@@ -239,6 +239,7 @@ esp_err_t olt_rx_channels_init()
     }
     return ESP_OK;
 }
+// disable all rmt rx channel & free all resource
 esp_err_t olt_rx_channels_free(void)
 {
     rmt_rx_event_callbacks_t cbs = {
@@ -253,55 +254,16 @@ esp_err_t olt_rx_channels_free(void)
     vQueueDelete(olt_rx_queue);
     return ESP_OK;
 }
-
-
+// receive olt_packet_t data olt_rx_data_t *olt_data
+// xTicksToWait -> portMAX_DELAY for blocking receive, 0 for nonblocking transmit
+// return ESP_OK or ESP_ERR_TIMEOUT
 esp_err_t olt_rx_data(olt_rx_data_t *olt_data,TickType_t xTicksToWait)
 {
     if (xQueueReceive(olt_rx_queue, olt_data, xTicksToWait) == pdFALSE)
     {
         ESP_LOGE(TAG, "RMT Recive timeout ");
-        return ESP_FAIL;
+        return ESP_ERR_TIMEOUT;
     }
     return ESP_OK;
 }
-
-void test_tx(void *p){
-    olt_packet_t tx_data;
-    while(1){
-        tx_data.val = 0x81000000;
-        olt_tx_data(tx_data,portMAX_DELAY);
-        tx_data.val = 0x11000000;
-        olt_tx_data(tx_data,portMAX_DELAY);
-        tx_data.val = 0x81000001;
-        olt_tx_data(tx_data,portMAX_DELAY);
-        vTaskDelay(10);
-    }
-}
-void test_rx(void *p){
-    olt_rx_data_t rx_data;
-    while(1){
-        olt_rx_data(&rx_data,portMAX_DELAY);
-        //ESP_LOGI(TAG,"Received data %lx, on channel %ld",rx_data.data.val,rx_data.channel);
-    }
-}
-
-
-#include "logic_analyzer_ws_server.h"
-int app_main()
-{
-    logic_analyzer_ws_server();
-
-    olt_rx_channels_init();
-    olt_tx_channel_init();
-
-    xTaskCreate(test_tx,"test_tx",2048*2,NULL,5,NULL);
-    xTaskCreate(test_rx,"test_rx",2048*2,NULL,5,NULL);
-    
-    while(1)
-    {
-        vTaskDelay(100);
-    }
-    return ESP_OK;
-}
-
 
