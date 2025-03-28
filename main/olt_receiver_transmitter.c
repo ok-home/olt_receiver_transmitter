@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Unlicense OR CC0-1.0
  */
 
-#include <stdio.h>
-#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -14,137 +12,129 @@
 #include "driver/rmt_rx.h"
 #include "driver/gpio.h"
 
-
 #include "olt_receiver_transmitter.h"
-
 
 #define TAG "OLT_TX_RX"
 
-
-#define OLT_TX_PIN 2
+// max rx channels esp32 = 8, esp32s3 = 4, esp32c3 = 2
+// for esp32 rx&tx channels shared -> rx channels = 1->tx, 7->rx
 #define OLT_RX_CHANNELS_NUM 7
+static const gpio_num_t olt_tx_gpio = 2; // tx channel gpio
+static const gpio_num_t olt_rx_gpio[OLT_RX_CHANNELS_NUM] = {2,2,2,2,2,2,2}; // rx channels gpio, for test rx gpio = tx gpio
 
-static const gpio_num_t olt_rx_gpio[OLT_RX_CHANNELS_NUM] = {2,2,2,2,2,2,2};
-
+#ifdef CONFIG_IDF_TARGET_ESP32
+#define OLT_CHANNEL_SIZE 64 // 48->esp32s3 64->esp32
+#else
+#define OLT_CHANNEL_SIZE 48 // 48->esp32s3 64->esp32
+#endif
+// define olt timing
 #define OLT_RMT_CLK 1*1000*1000 // 1 MHz
 #define OLT_RMT_TICK 600 // 600 mksek
-#define OLT_CHANNEL_SIZE 64 // 48->esp32s3 64->esp32
-
 static const rmt_symbol_word_t olt_rmt_start = {
     .level0 = 1,
-    .duration0 = OLT_RMT_TICK*4,
+    .duration0 = OLT_RMT_TICK*4,    // start bit = 2400 mks
     .level1 = 0,
-    .duration1 = OLT_RMT_TICK,
+    .duration1 = OLT_RMT_TICK,      // pause 600 msks
 };
 static const rmt_symbol_word_t olt_rmt_one = {
     .level0 = 1,
-    .duration0 = OLT_RMT_TICK*2,
+    .duration0 = OLT_RMT_TICK*2,    // bit one = 1200 mks 
     .level1 = 0,
-    .duration1 = OLT_RMT_TICK,
+    .duration1 = OLT_RMT_TICK,      // pause 600 msks
 };
 static const rmt_symbol_word_t olt_rmt_zero = {
     .level0 = 1,
-    .duration0 = OLT_RMT_TICK,
+    .duration0 = OLT_RMT_TICK,      // bit zero = 600 mks
     .level1 = 0,
-    .duration1 = OLT_RMT_TICK,
+    .duration1 = OLT_RMT_TICK,      // pause 600 msks
 };
-static const rmt_symbol_word_t olt_rmt_pause = {
+static const rmt_symbol_word_t olt_rmt_pause = { // pause between tx packet 6000 mksek 
     .level0 = 0,
-    .duration0 = OLT_RMT_TICK*5, // pause 3000 mksek ??
+    .duration0 = OLT_RMT_TICK*5, // pause  3000 mksek 
     .level1 = 0,
-    .duration1 = OLT_RMT_TICK*5,             //  stop
+    .duration1 = OLT_RMT_TICK*5, // pause 3000 mksek            
 };
-static const rmt_symbol_word_t olt_rmt_stop = {
+static const rmt_symbol_word_t olt_rmt_stop = { //  stop rmt word
     .level0 = 0,
     .duration0 = 0, 
     .level1 = 0,
-    .duration1 = 0,             //  stop
+    .duration1 = 0,             
 };
-static const rmt_receive_config_t receive_config = {
-    .signal_range_min_ns = 10,                       // the shortest duration
-    .signal_range_max_ns = OLT_RMT_TICK*5*1000, // the longest duration 3000 mks
+static const rmt_receive_config_t receive_config = { // default receiver config for all channels
+    .signal_range_min_ns = 10,                   // the shortest duration
+    .signal_range_max_ns = OLT_RMT_TICK*5*1000, // the longest duration 3000 mks, end packet
 };
-
-
-static QueueHandle_t olt_tx_queue = 0;
-static QueueHandle_t olt_rx_queue = 0;
-
-static TaskHandle_t olt_tx_task_handle = 0;
-
+// tx rmt handle
 static rmt_channel_handle_t tx_chan_handle = NULL;
 static rmt_encoder_handle_t tx_encoder = NULL;
-
+// rx rmt channels handle & receive buffers 
 typedef struct rmt_rx_channel_param
 {
     rmt_channel_handle_t rx_chan_handle;
     rmt_symbol_word_t olt_channel_rx_data[OLT_CHANNEL_SIZE];
 } rmt_rx_channel_param_t;
-typedef struct rx_queue_channels_data
-{
-    uint32_t channel;
-    rmt_rx_done_event_data_t rmt_event_data;
-} rx_queue_channels_data_t;
-
-
 static rmt_rx_channel_param_t rmt_channels_param[OLT_RX_CHANNELS_NUM];
+// rx callback queue
+static QueueHandle_t olt_rx_queue = NULL;
 
-
+// decode data from olt_packet_t to rmt_symbol_word_t packet 
 static size_t olt_tx_rmt_decode(olt_packet_t data_in, rmt_symbol_word_t *data_out)
 {
     uint32_t mask = 0x80000000;
     size_t size = 0;
+    // shot_long_bit define command(24-32 bit)/damage(22 bit) packet
+    // byte_ext define extended info, if the content is not zero there is an extended package (32 bit)
     if(data_in.shot_packet.shot_long_bit == 0){size = 22;}
     else {size = (data_in.long_packet.byte_ext == 0) ? 24 : 32;}
     size++;
 
-    data_out[0] = olt_rmt_start;
+    data_out[0] = olt_rmt_start; // start bit
     int i;
+    // fill rmt data olt_packet_t to rmt_symbol_word_t
+    // msb first
     for(i=1;i < size ; i++)
     {
         data_out[i] = (mask & data_in.val) ?  olt_rmt_one : olt_rmt_zero;
         mask >>= 1;
     }
-    data_out[i++] = olt_rmt_pause;
-    data_out[i] = olt_rmt_stop;
+    data_out[i++] = olt_rmt_pause;  // add pause between tx packet, at the end of packet
+    data_out[i] = olt_rmt_stop;     // stop rmt
     return i;
 }
-// can it be removed ?
-static void olt_tx_task(void* p)
+// transmit olt_packet_t data
+// xTicksToWait -> portMAX_DELAY for blocking transmit, 0 for nonblocking transmit
+// for nonblocking transmit use olt_tx_wait_all_done() for check transmit done
+// return ESP_OK or ESP_ERR_TIMEOUT
+esp_err_t olt_tx_data(olt_packet_t tx_packet,TickType_t xTicksToWait)
 {
-    ESP_LOGI(TAG,"Create tx task");
-    rmt_transmit_config_t rmt_tx_config = {0};
-    //rmt_tx_config.loop_count = 0;
-    rmt_symbol_word_t rmt_data_out[OLT_CHANNEL_SIZE];
-    olt_packet_t receive_packet = {0};
-    while(1){
-    xQueueReceive(olt_tx_queue,&receive_packet,portMAX_DELAY);
-    size_t decoded_data_size = olt_tx_rmt_decode(receive_packet,rmt_data_out);
-    ESP_ERROR_CHECK(rmt_transmit(tx_chan_handle, tx_encoder, rmt_data_out, decoded_data_size*sizeof(rmt_symbol_word_t), &rmt_tx_config));
-    rmt_tx_wait_all_done(tx_chan_handle, portMAX_DELAY);
-    }
+    rmt_transmit_config_t rmt_tx_config = {}; // tx config with all data = 0;
+    rmt_symbol_word_t rmt_data_out[OLT_CHANNEL_SIZE]; // rmt transmit buffer
+    size_t decoded_data_size = olt_tx_rmt_decode(tx_packet,rmt_data_out); // decode olt_packet_t to rmt_symbol_word_t buffer
+    ESP_ERROR_CHECK(rmt_transmit(tx_chan_handle, tx_encoder, rmt_data_out, decoded_data_size*sizeof(rmt_symbol_word_t), &rmt_tx_config)); // start transmit
+    return rmt_tx_wait_all_done(tx_chan_handle, xTicksToWait); // wait transmit done
 }
-
-esp_err_t olt_tx_data(olt_packet_t data)
+// check all rmt data transmitted
+// return ESP_OK or ESP_ERR_TIMEOUT
+esp_err_t olt_tx_wait_all_done(TickType_t xTicksToWait)
 {
-    const void *tx_packet = &data;
-    xQueueSend(olt_tx_queue, tx_packet, portMAX_DELAY);
-    return ESP_OK;
+    return rmt_tx_wait_all_done(tx_chan_handle, xTicksToWait); 
 }
-
+// init tx channel
 esp_err_t olt_tx_channel_init(void)
 {
     ESP_LOGI(TAG,"Init tx channel");
     rmt_tx_channel_config_t tx_chan_config = {
         .clk_src = RMT_CLK_SRC_DEFAULT, // select source clock
-        .gpio_num = OLT_TX_PIN,
+        .gpio_num = olt_tx_gpio,        // tx gpio
         .mem_block_symbols = OLT_CHANNEL_SIZE,
         .flags.io_loop_back = 1,    // gpio output/input mode // for test only
-        .resolution_hz = OLT_RMT_CLK,
-        .trans_queue_depth = 10, // set the maximum number of transactions that can pend in the background
+        .resolution_hz = OLT_RMT_CLK,   // channel clk -> 1mHz
+        .trans_queue_depth = 1, // set the maximum number of transactions that can pend in the background
     };
     ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_chan_config, &tx_chan_handle));
 
 #if 0
+    // carrier config
     rmt_carrier_config_t tx_carrier_cfg = {
         .duty_cycle = 0.33,                 // duty cycle 33%
         .frequency_hz = 56*1000,              // 56 KHz
@@ -154,40 +144,79 @@ esp_err_t olt_tx_channel_init(void)
     ESP_ERROR_CHECK(rmt_apply_carrier(tx_chan_handle, &tx_carrier_cfg));
 #endif
 
-    rmt_copy_encoder_config_t tx_encoder_config = {};
-    ESP_ERROR_CHECK(rmt_new_copy_encoder(&tx_encoder_config, &tx_encoder));
-    ESP_ERROR_CHECK(rmt_enable(tx_chan_handle));
+    rmt_copy_encoder_config_t tx_encoder_config = {};                       // default copy encoder config
+    ESP_ERROR_CHECK(rmt_new_copy_encoder(&tx_encoder_config, &tx_encoder)); // create copy encoder
+    ESP_ERROR_CHECK(rmt_enable(tx_chan_handle));                            // enable tx channel   
 
-    olt_tx_queue = xQueueCreate(10,sizeof(olt_packet_t));
-
-    xTaskCreate(olt_tx_task,"olt_tx_task",2048*4,NULL,5,&olt_tx_task_handle);
-
-    return ESP_OK;
+    return ESP_OK; // allready ESP_OK,  error detected on ESP_ERROR_CHECK
 }
-esp_err_t olt_tx_channel_deinit(void)
+// disable rvt channel & free all resource
+esp_err_t olt_tx_channel_free(void)
 {
     rmt_disable(tx_chan_handle);
     rmt_del_encoder(tx_encoder);
     rmt_del_channel(tx_chan_handle);
-    vQueueDelete(olt_tx_queue);
-    vTaskDelete(olt_tx_task_handle);
     return ESP_OK;
 }
-
-static bool IRAM_ATTR rmt_rx_done_callback(rmt_channel_handle_t channel, const rmt_rx_done_event_data_t *edata, void *user_data)
+// encode rx data from rmt_rx_done_event_data_t rmt_event_data (rmt_symbol_word_t* & received size) to uint32_t enc_data (olt_packet_t.val)
+// return ESP_OK or ESP_FAIL if rmt_event_data damaged
+static esp_err_t IRAM_ATTR olt_rx_encode(uint32_t *enc_data, const rmt_rx_done_event_data_t *rmt_event_data)
+{
+    *enc_data = 0;
+    switch(size) 
+    {
+        case 23:
+        case 25:
+        case 33:
+            break; // check size, only 23/25/33 bit in packet (data+start bit)
+        default:
+    //        ESP_EARLY_LOGE(TAG,"ERR bit count %d out of range",size);
+            return ESP_FAIL;
+    }
+    // chesk duration of start bit -> 2400 mks
+    if ( rmt_event_data->received_symbols[0].duration0 > (OLT_RMT_TICK*4+OLT_RMT_TICK/3) || rmt_event_data->received_symbols[0].duration0 < (OLT_RMT_TICK*4-OLT_RMT_TICK/3) )
+    {
+    //    ESP_EARLY_LOGE(TAG,"ERR start bit duration %d out of range",buf[0].duration0);
+        return ESP_FAIL; // out of range
+    }
+    // encode all packet, msb first
+    for(int i = 1; i < 33 ; i++ )
+    {
+        *enc_data <<= 1;
+        if(i >= size){ continue;}  // last bits zero
+        if(rmt_event_data->received_symbols[i].duration0 < (OLT_RMT_TICK*2+OLT_RMT_TICK/3) && rmt_event_data->received_symbols[i].duration0 > (OLT_RMT_TICK*2-OLT_RMT_TICK/3) )
+            {*enc_data |= 0x1;  continue;} // one
+        if(rmt_event_data->received_symbols[i].duration0 < (OLT_RMT_TICK*1+OLT_RMT_TICK/3) && rmt_event_data->received_symbols[i].duration0 > (OLT_RMT_TICK*1-OLT_RMT_TICK/3) )
+            { continue;} // zero
+    //    ESP_EARLY_LOGE(TAG,"ERR bits %d duration %d out of range",i,buf[i].duration0);
+        return ESP_FAIL; // out of range
+    }
+    return ESP_OK;
+}
+// rmt callback, call when rmt packet received
+// user data -> channel number from olt_rx_gpio[OLT_RX_CHANNELS_NUM]
+// encode data, restart receive, send encoded data to receive queue
+static bool IRAM_ATTR rmt_rx_done_callback(rmt_channel_handle_t channel_handle, const rmt_rx_done_event_data_t *edata, void *user_data)
 {
     BaseType_t high_task_wakeup = pdFALSE;
-    rx_queue_channels_data_t q_data;
-    q_data.channel = (uint32_t)user_data;
-    memcpy(&q_data.rmt_event_data,edata,sizeof(rmt_rx_done_event_data_t));
-    // send the received RMT symbols to the parser task
-    xQueueSendFromISR(olt_rx_queue, &q_data, &high_task_wakeup);
+    olt_rx_data_t q_data; // encoded data
+    q_data.channel = (uint32_t)user_data; // received channel
+    esp_err_t err = olt_rx_encode(&q_data.data.val, edata); // encode
+    // restart channel receive
+    rmt_receive(rmt_channels_param[q_data.channel].rx_chan_handle, rmt_channels_param[q_data.channel].olt_channel_rx_data, sizeof(rmt_channels_param[q_data.channel].olt_channel_rx_data), &receive_config);
+    // if the packet is encoded without errors, we send it to the queue
+    if(err == ESP_OK){
+        xQueueSendFromISR(olt_rx_queue, &q_data, &high_task_wakeup);
+    }
     // return whether any task is woken up
     return high_task_wakeup == pdTRUE;
 }
+// init all rx channels
+// the number of channels and connection to the gpio is determined olt_rx_gpio[OLT_RX_CHANNELS_NUM]
+// 
 esp_err_t olt_rx_channels_init()
 {
-    ESP_LOGI(TAG, "Start receive");
+    ESP_LOGI(TAG, "Init all rx channels");
     rmt_rx_channel_config_t rx_chan_config = {
         .clk_src = RMT_CLK_SRC_DEFAULT,        // select source clock
         .resolution_hz = OLT_RMT_CLK, // tick resolution, 
@@ -199,7 +228,7 @@ esp_err_t olt_rx_channels_init()
     rmt_rx_event_callbacks_t cbs = {
         .on_recv_done = rmt_rx_done_callback,
     };
-    olt_rx_queue = xQueueCreate(10, sizeof(rx_queue_channels_data_t));
+    olt_rx_queue = xQueueCreate(10, sizeof(olt_rx_data_t));
 
     for(int ch = 0;ch < OLT_RX_CHANNELS_NUM;ch++){
         rx_chan_config.gpio_num = olt_rx_gpio[ch];                // GPIO number
@@ -209,9 +238,8 @@ esp_err_t olt_rx_channels_init()
         ESP_ERROR_CHECK(rmt_receive(rmt_channels_param[ch].rx_chan_handle, rmt_channels_param[ch].olt_channel_rx_data, sizeof(rmt_channels_param[ch].olt_channel_rx_data), &receive_config));
     }
     return ESP_OK;
-
 }
-esp_err_t olt_rx_channels_deinit(void)
+esp_err_t olt_rx_channels_free(void)
 {
     rmt_rx_event_callbacks_t cbs = {
         .on_recv_done = NULL,
@@ -223,68 +251,17 @@ esp_err_t olt_rx_channels_deinit(void)
         rmt_del_channel(rmt_channels_param[ch].rx_chan_handle);
     }
     vQueueDelete(olt_rx_queue);
-    ESP_LOGI(TAG, "Receive OK");
-
     return ESP_OK;
 }
 
-static esp_err_t olt_rx_encode(olt_rx_data_t *olt_data, rx_queue_channels_data_t *rmt_data)
-{
-    olt_data->channel = rmt_data->channel;
-    size_t size = rmt_data->rmt_event_data.num_symbols;
-    rmt_symbol_word_t *buf = rmt_data->rmt_event_data.received_symbols;
-    uint32_t enc_data = 0;
-    switch(size)
-    {
-        case 23:
-        case 25:
-        case 33:
-            break;
-        default:
-        ESP_LOGE(TAG,"ERR bit count %d out of range",size);
-        return ESP_FAIL;
-    }
-    if ( buf[0].duration0 > (OLT_RMT_TICK*4+OLT_RMT_TICK/3) || buf[0].duration0 < (OLT_RMT_TICK*4-OLT_RMT_TICK/3) )
-    {
-        ESP_LOGE(TAG,"ERR start bit duration %d out of range",buf[0].duration0);
-        return ESP_FAIL; // out of range
-    }
-//    ESP_LOGI(TAG,"lvl=%d dur=%d, enc=%lx",buf[0].level0,buf[0].duration0,enc_data);
-    for(int i = 1; i < 33 ; i++ )
-    {
-        enc_data <<= 1;
-//        ESP_LOGI(TAG,"lvl=%d dur=%d, enc=%lx",buf[i].level0,buf[i].duration0,enc_data);
-        if(i>=size){ continue;}  // last bits zero
-        if(buf[i].duration0 < (OLT_RMT_TICK*2+OLT_RMT_TICK/3) && buf[i].duration0 > (OLT_RMT_TICK*2-OLT_RMT_TICK/3) )
-            {enc_data |= 0x1;  continue;} // one
-        if(buf[i].duration0 < (OLT_RMT_TICK*1+OLT_RMT_TICK/3) && buf[i].duration0 > (OLT_RMT_TICK*1-OLT_RMT_TICK/3) )
-            { continue;} // zero
-
-            ESP_LOGE(TAG,"ERR bits %d duration %d out of range",i,buf[i].duration0);
-        return ESP_FAIL; // out of range
-    }
-    olt_data->data.val = enc_data;
-    return ESP_OK;
-}
 
 esp_err_t olt_rx_data(olt_rx_data_t *olt_data,TickType_t xTicksToWait)
 {
-    rx_queue_channels_data_t rx_data;
-
-    if (xQueueReceive(olt_rx_queue, &rx_data, xTicksToWait) == pdFALSE)
+    if (xQueueReceive(olt_rx_queue, olt_data, xTicksToWait) == pdFALSE)
     {
-        ESP_LOGI(TAG, "RMT Recive timeout ");
+        ESP_LOGE(TAG, "RMT Recive timeout ");
+        return ESP_FAIL;
     }
-    else
-    {
-        gpio_set_level(4,1);
-        olt_rx_encode(olt_data, &rx_data);
-        gpio_set_level(4,0);
-        ESP_ERROR_CHECK(rmt_receive(rmt_channels_param[rx_data.channel].rx_chan_handle, rmt_channels_param[rx_data.channel].olt_channel_rx_data, sizeof(rmt_channels_param[rx_data.channel].olt_channel_rx_data), &receive_config));
-
-
-    }
-    // next receive
     return ESP_OK;
 }
 
@@ -292,12 +269,12 @@ void test_tx(void *p){
     olt_packet_t tx_data;
     while(1){
         tx_data.val = 0x81000000;
-        olt_tx_data(tx_data);
+        olt_tx_data(tx_data,portMAX_DELAY);
         tx_data.val = 0x11000000;
-        olt_tx_data(tx_data);
+        olt_tx_data(tx_data,portMAX_DELAY);
         tx_data.val = 0x81000001;
-        olt_tx_data(tx_data);
-        vTaskDelay(100);
+        olt_tx_data(tx_data,portMAX_DELAY);
+        vTaskDelay(10);
     }
 }
 void test_rx(void *p){
@@ -313,10 +290,6 @@ void test_rx(void *p){
 int app_main()
 {
     logic_analyzer_ws_server();
-
-    gpio_reset_pin(4);
-    gpio_set_direction(4,GPIO_MODE_OUTPUT);
-    gpio_set_level(4,0);
 
     olt_rx_channels_init();
     olt_tx_channel_init();

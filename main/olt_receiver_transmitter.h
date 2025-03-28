@@ -27,7 +27,8 @@ typedef struct
 
 esp_err_t olt_tx_channel_init(void);
 esp_err_t olt_rx_channels_init(void);
-esp_err_t olt_tx_channel_deinit(void);
-esp_err_t olt_rx_channels_deinit(void);
-esp_err_t olt_tx_data(olt_packet_t data);
+esp_err_t olt_tx_channel_free(void);
+esp_err_t olt_rx_channels_free(void);
+esp_err_t olt_tx_data(olt_packet_t data,TickType_t xTicksToWait);
+esp_err_t olt_tx_wait_all_done(TickType_t xTicksToWait);
 esp_err_t olt_rx_data(olt_rx_data_t *data,TickType_t xTicksToWait);
