@@ -20,6 +20,12 @@ void test_tx(void *p){
         olt_tx_data(tx_data,portMAX_DELAY);
         tx_data.val = 0x81000001;
         olt_tx_data(tx_data,portMAX_DELAY);
+        tx_data.val = 0x81000000;
+        olt_tx_data(tx_data,portMAX_DELAY);
+        tx_data.val = 0x81010000;
+        olt_tx_data(tx_data,portMAX_DELAY);
+        tx_data.val = 0x81001000;
+        olt_tx_data(tx_data,portMAX_DELAY);
         vTaskDelay(10);
     }
 }
