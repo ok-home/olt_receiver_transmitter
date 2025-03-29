@@ -16,6 +16,8 @@
 
 #define TAG "OLT_TX_RX"
 
+//#define ENABLE_TX_CARRIER
+
 // max rx channels esp32 = 8, esp32s3 = 4, esp32c3 = 2
 // for esp32 rx&tx channels shared -> rx channels = 1->tx, 7->rx
 #define OLT_RX_CHANNELS_NUM 7
@@ -133,7 +135,7 @@ esp_err_t olt_tx_channel_init(void)
     };
     ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_chan_config, &tx_chan_handle));
 
-#if 0
+#ifdef ENABLE_TX_CARRIER
     // carrier config
     rmt_carrier_config_t tx_carrier_cfg = {
         .duty_cycle = 0.33,                 // duty cycle 33%
@@ -226,6 +228,14 @@ esp_err_t olt_rx_channels_init()
         .flags.with_dma = false,                // do not need DMA backend
         .flags.io_loop_back = 1,
     };
+#ifdef ENABLE_RX__CARRIER
+    rmt_carrier_config_t rx_carrier_cfg = {
+        .duty_cycle = 0.33,                 // duty cycle 33%
+        .frequency_hz = 56000,              // 25 KHz carrier, should be smaller than the transmitter's carrier frequency
+        .flags.polarity_active_low = false, // the carrier is modulated to high level
+    };
+#endif
+    // demodulate carrier from RX channel
     rmt_rx_event_callbacks_t cbs = {
         .on_recv_done = rmt_rx_done_callback,
     };
@@ -234,6 +244,9 @@ esp_err_t olt_rx_channels_init()
     for(int ch = 0;ch < OLT_RX_CHANNELS_NUM;ch++){
         rx_chan_config.gpio_num = olt_rx_gpio[ch];                // GPIO number
         ESP_ERROR_CHECK(rmt_new_rx_channel(&rx_chan_config, &(rmt_channels_param[ch].rx_chan_handle)));
+#ifdef ENABLE_RX__CARRIER
+        ESP_ERROR_CHECK(rmt_apply_carrier(rmt_channels_param[ch].rx_chan_handle, &rx_carrier_cfg));
+#endif
         ESP_ERROR_CHECK(rmt_rx_register_event_callbacks(rmt_channels_param[ch].rx_chan_handle, &cbs, (void*)ch));
         ESP_ERROR_CHECK(rmt_enable(rmt_channels_param[ch].rx_chan_handle));
         ESP_ERROR_CHECK(rmt_receive(rmt_channels_param[ch].rx_chan_handle, rmt_channels_param[ch].olt_channel_rx_data, sizeof(rmt_channels_param[ch].olt_channel_rx_data), &receive_config));
