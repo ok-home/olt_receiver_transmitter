@@ -1,3 +1,12 @@
+/* OpenLaserTag IR receiver/transmitter example
+
+   This example code is in the Public Domain (or CC0 licensed, at your option.)
+
+   Unless required by applicable law or agreed to in writing, this
+   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+   CONDITIONS OF ANY KIND, either express or implied.
+*/
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -39,10 +48,10 @@ void test_rx(void *p){
 }
 
 
-#include "logic_analyzer_ws_server.h"
+//#include "logic_analyzer_ws_server.h" // test with logic_analyzer https://github.com/ok-home/logic_analyzer
 int app_main()
 {
-    logic_analyzer_ws_server();
+    //logic_analyzer_ws_server(); // test with logic_analyzer https://github.com/ok-home/logic_analyzer
 
     olt_rx_channels_init();
     olt_tx_channel_init();

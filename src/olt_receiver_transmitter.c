@@ -1,8 +1,11 @@
-/*
- * SPDX-FileCopyrightText: 2021-2022 Espressif Systems (Shanghai) CO LTD
- *
- * SPDX-License-Identifier: Unlicense OR CC0-1.0
- */
+/* OpenLaserTag IR receiver/transmitter
+
+   This example code is in the Public Domain (or CC0 licensed, at your option.)
+
+   Unless required by applicable law or agreed to in writing, this
+   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+   CONDITIONS OF ANY KIND, either express or implied.
+*/
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -115,7 +118,7 @@ esp_err_t olt_tx_data(olt_packet_t tx_packet,TickType_t xTicksToWait)
     ESP_ERROR_CHECK(rmt_transmit(tx_chan_handle, tx_encoder, rmt_data_out, decoded_data_size*sizeof(rmt_symbol_word_t), &rmt_tx_config)); // start transmit
     return rmt_tx_wait_all_done(tx_chan_handle, xTicksToWait); // wait transmit done
 }
-// check all rmt data transmitted
+// wait all rmt data transmitted
 // return ESP_OK or ESP_ERR_TIMEOUT
 esp_err_t olt_tx_wait_all_done(TickType_t xTicksToWait)
 {
