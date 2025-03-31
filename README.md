@@ -1,8 +1,8 @@
 # Simple exchange according to the OpenLaserTag IR protocol (ESP32, ESP32S3, ESP32C3)
   - [OpenLaserTag IR protocol](https://openlasertag.org/language/en/openlasertag-ir-communication-protocol/) for ESP32 RMT
-  - Protocol extended to 32 bits for Command Packet
+  - Protocol extended to 32 bits for Command (Long) Packet
   - Support Tx Carrier, Rx carrier detect (ESP32S3,ESP32C3)
-## interface functions
+## interface functions and gpio setting
 ```
 // https://github.com/ok-home/olt_receiver_transmitter/blob/main/src/olt_receiver_transmitter.c
 // max rx channels esp32 = 8, esp32s3 = 4, esp32c3 = 2
